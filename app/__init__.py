@@ -47,3 +47,5 @@ def create_app():
     scheduler.start()
     
     return app
+
+application = create_app()
