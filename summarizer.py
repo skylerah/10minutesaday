@@ -18,48 +18,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def update_summaries():
-    """Function to update summaries. Called both on startup and by scheduler."""
-    logger.info("Starting summary update")
-    summarizer = HNSummarizer()
-    
-    try:
-        # Clear old summaries before updating
-        summarizer.clear_old_summaries()
-        
-        stories = summarizer.fetch_top_stories()
-        total_stories = len(stories)
-        logger.info(f"Fetched {total_stories} stories to process")
-        
-        processed_stories = 0
-        with ThreadPoolExecutor(max_workers=summarizer.MAX_WORKERS) as executor:
-            for story_id in stories:
-                try:
-                    story = summarizer.fetch_item(story_id)
-                    if story:
-                        comments = summarizer.fetch_comments(story_id)
-                        summary = summarizer.summarize_comments(story, comments)
-                        summarizer.save_summary(summary)
-                        processed_stories += 1
-                        logger.info(f"Processed story {processed_stories}/{total_stories}")
-                        time.sleep(1)  # Rate limiting
-                except Exception as e:
-                    logger.error(f"Error processing story {story_id}: {str(e)}")
-                    continue
-        
-        logger.info(f"Successfully completed summary update. Processed {processed_stories} stories.")
-        
-    except Exception as e:
-        logger.error(f"Error during summary update: {str(e)}")
-        raise
-
 class HNSummarizer:
     def __init__(self):
         logger.info("Initializing HNSummarizer")
         self.client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
         self.HN_API_BASE = "https://hacker-news.firebaseio.com/v0"
         self.MAX_STORIES = 30
-        self.MAX_COMMENTS_PER_STORY = 30
+        self.MAX_COMMENTS_PER_STORY = 100
         self.MAX_WORKERS = 5
         self.db_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'summaries.db')
 
@@ -139,7 +104,7 @@ class HNSummarizer:
         return processed_summary
 
     def summarize_comments(self, story: Dict[str, Any], comments: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Use GPT-4 to summarize comments and categorize discussions with citations."""
+        """Use GPT-4 to create concise summaries and analyze controversy level."""
         story_id = story['id']
         logger.info(f"Summarizing comments for story {story_id}: {story.get('title', 'No title')}")
         
@@ -157,22 +122,36 @@ class HNSummarizer:
         logger.debug(f"Processing {len(comment_texts)} comments for summarization")
         
         prompt = f"""
+        Analyze this Hacker News discussion and provide:
+
+        1. The 3-5 most significant points from the discussion, in bullet form. Each bullet should be 1-2 lines maximum.
+        2. A controversy rating from 0-10, where:
+           - 0: Complete consensus, minimal disagreement
+           - 5: Healthy debate with different viewpoints
+           - 10: Intense disagreement, strong opposing views
+
         Title: {story.get('title')}
         URL: {story.get('url', 'No URL')}
         Number of comments: {len(comments)}
 
-        Please analyze these comments from a Hacker News discussion and:
-        1. Identify 3-5 main discussion themes/categories
-        2. Provide a brief summary of the key points within each category
-        3. Note any significant consensus or disagreements
+        RESPONSE FORMAT:
+        CONTROVERSY: [rating]
 
-        IMPORTANT: When referencing specific comments or points made by commenters, cite them using their numbers in square brackets.
-        For example: "Several users argued for this approach [1,2,3]" or "One commenter suggested [4]"
+        KEY POINTS:
+        - [key point without referencing specific users] [citations]
+        - [key point without referencing specific users] [citations]
+        - [key point without referencing specific users] [citations]
+        (etc.)
+
+        IMPORTANT: 
+        - Always cite specific comments using [N] notation
+        - Focus on the points being made, not who made them
+        - State points directly without phrases like "users noted," "commenters suggested," etc.
+        - Keep each point concise and clear
+        - Use dashes (-) for all bullet points
 
         Comments:
         {chr(10).join(comment_texts[:15])}
-
-        Remember to cite specific comments using their numbers in square brackets when summarizing points or opinions.
         """
 
         try:
@@ -180,8 +159,14 @@ class HNSummarizer:
             response = self.client.chat.completions.create(
                 model="gpt-4o",
                 messages=[
-                    {"role": "system", "content": "You are an expert at analyzing and summarizing technical discussions. Always cite specific comments using [N] notation when referencing them."},
-                    {"role": "user", "content": prompt}
+                    {
+                        "role": "system", 
+                        "content": "You are an expert at analyzing technical discussions. Be extremely concise and focus on the most important points. Never reference users directly (e.g., avoid 'User 1 said,' 'commenters noted,' etc.). Instead, state points directly and use citations to support them."
+                    },
+                    {
+                        "role": "user", 
+                        "content": prompt
+                    }
                 ],
                 max_tokens=1000,
                 temperature=0.7
@@ -237,18 +222,6 @@ class HNSummarizer:
             """)
             return [dict(row) for row in cursor.fetchall()]
 
-    def needs_update(self) -> bool:
-        """Check if we need to update the summaries."""
-        with self.get_db() as conn:
-            cursor = conn.execute("""
-                SELECT last_updated FROM last_update WHERE id = 1
-            """)
-            result = cursor.fetchone()
-            if not result:
-                return True
-            last_update = datetime.fromisoformat(result[0])
-            return datetime.utcnow() - last_update > timedelta(hours=23)
-
     def clear_old_summaries(self):
         """Clear out old summaries before updating."""
         logger.info("Clearing old summaries")
@@ -261,9 +234,37 @@ class HNSummarizer:
             """)
         logger.info("Old summaries cleared")
 
-    def update_last_updated(self):
-        """Update the last_updated timestamp."""
-        with self.get_db() as conn:
-            conn.execute("""
-                UPDATE last_update SET last_updated = datetime('now') WHERE id = 1
-            """)
+def update_summaries():
+    """Function to update summaries. Called both on startup and by scheduler."""
+    logger.info("Starting summary update")
+    summarizer = HNSummarizer()
+    
+    try:
+        # Clear old summaries before updating
+        summarizer.clear_old_summaries()
+        
+        stories = summarizer.fetch_top_stories()
+        total_stories = len(stories)
+        logger.info(f"Fetched {total_stories} stories to process")
+        
+        processed_stories = 0
+        with ThreadPoolExecutor(max_workers=summarizer.MAX_WORKERS) as executor:
+            for story_id in stories:
+                try:
+                    story = summarizer.fetch_item(story_id)
+                    if story:
+                        comments = summarizer.fetch_comments(story_id)
+                        summary = summarizer.summarize_comments(story, comments)
+                        summarizer.save_summary(summary)
+                        processed_stories += 1
+                        logger.info(f"Processed story {processed_stories}/{total_stories}")
+                        time.sleep(1)
+                except Exception as e:
+                    logger.error(f"Error processing story {story_id}: {str(e)}")
+                    continue
+        
+        logger.info(f"Successfully completed summary update. Processed {processed_stories} stories.")
+        
+    except Exception as e:
+        logger.error(f"Error during summary update: {str(e)}")
+        raise

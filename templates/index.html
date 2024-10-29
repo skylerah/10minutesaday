@@ -6,6 +6,36 @@
     <title>HackerNews Discussion Summarizer</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.2/marked.min.js"></script>
+    <style>
+        .summary-content ul {
+            list-style-type: none;
+            padding: 0;
+            margin: 0;
+        }
+        .summary-content li {
+            /* display: flex; */
+            /* align-items: flex-start; */
+            padding: 0.25rem 0;
+            line-height: 1.5;
+        }
+        .summary-content li::before {
+            content: "—";
+            color: rgb(37 99 235);
+            font-weight: bold;
+            margin-right: 0.5rem;
+            min-width: 1rem; */
+        }
+        /* Remove any spacing between citation links */
+        /* .summary-content a {
+            display: inline;
+            margin: 0;
+            padding: 2;
+        } */
+        /* Remove spacing between citation brackets */
+        /* .summary-content a + a {
+            margin-left: 0;
+        } */
+    </style>
 </head>
 <body class="bg-gray-100">
     <div class="container mx-auto px-4 py-8">
@@ -20,11 +50,57 @@
     </div>
 
     <script>
-        // Configure marked.js to preserve the HTML we generate for citations
         marked.setOptions({
             headerIds: false,
             mangle: false
         });
+
+        function getControversyColor(rating) {
+            if (rating <= 5) {
+                return `rgb(${Math.floor(255 * (rating/5))}, 255, 0)`;
+            } else {
+                return `rgb(255, ${Math.floor(255 * (2 - rating/5))}, 0)`;
+            }
+        }
+
+        function formatSummaryContent(summary) {
+            let content = summary
+                .replace(/CONTROVERSY:\s*\d+\s*\n*/g, '')
+                .replace(/KEY POINTS:\s*\n*/g, '')
+                .trim();
+
+            let lines = content.split('\n');
+            let formattedLines = [];
+            let inList = false;
+
+            for (let line of lines) {
+                line = line.trim();
+                if (line) {
+                    if (line.startsWith('•') || line.startsWith('* ') || line.startsWith('- ')) {
+                        if (!inList) {
+                            formattedLines.push('<ul>');
+                            inList = true;
+                        }
+                        let content = line.replace(/^[•*-]\s*/, '').trim();
+                        // Ensure no spaces between citations
+                        content = content.replace(/\]\s+\[/g, '][');
+                        formattedLines.push(`<li>${content} </li>`);
+                    } else {
+                        if (inList) {
+                            formattedLines.push('</ul>');
+                            inList = false;
+                        }
+                        formattedLines.push(`<p>${line}</p>`);
+                    }
+                }
+            }
+
+            if (inList) {
+                formattedLines.push('</ul>');
+            }
+
+            return formattedLines.join('\n');
+        }
 
         async function checkForSummaries() {
             const loadingEl = document.getElementById('loading');
@@ -36,13 +112,11 @@
                 const summaries = await response.json();
                 
                 if (!summaries || summaries.length === 0) {
-                    // If no summaries, wait and try again
                     loadingMessage.textContent = "Initial summarization in progress. This may take a few minutes...";
-                    setTimeout(checkForSummaries, 10000); // Try again in 10 seconds
+                    setTimeout(checkForSummaries, 10000);
                     return;
                 }
                 
-                // We have summaries, show them
                 loadingEl.classList.add('hidden');
                 summariesEl.classList.remove('hidden');
                 
@@ -50,11 +124,11 @@
                     const article = document.createElement('article');
                     article.className = 'bg-white rounded-lg shadow-md p-6';
                     
-                    // Process the summary through marked for Markdown rendering
-                    const processedSummary = marked.parse(summary.summary);
+                    const controversyMatch = summary.summary.match(/CONTROVERSY:\s*(\d+)/);
+                    const controversyRating = controversyMatch ? parseInt(controversyMatch[1]) : null;
                     
-                    // Ensure comment_count is handled properly
-                    const commentCount = summary.comment_count || 0;
+                    // Format the summary content
+                    const formattedSummary = formatSummaryContent(summary.summary);
                     
                     article.innerHTML = `
                         <h2 class="text-xl font-semibold mb-2">
@@ -62,41 +136,36 @@
                                 ${summary.title}
                             </a>
                         </h2>
-                        <div class="text-sm text-gray-600 mb-4 flex gap-4">
+                        <div class="text-sm text-gray-600 mb-4 flex gap-4 items-center flex-wrap">
                             <span>${summary.points} points</span>
                             <span>|</span>
-                            <span>${commentCount} comments</span>
+                            <span>${summary.comment_count} comments</span>
                             <span>|</span>
                             <a href="https://news.ycombinator.com/item?id=${summary.story_id}" 
                                class="text-blue-600 hover:text-blue-800" 
                                target="_blank">
                                 View on HN
                             </a>
+                            ${controversyRating !== null ? `
+                                <span>|</span>
+                                <div class="flex items-center gap-2">
+                                    <span>Controversy:</span>
+                                    <div class="px-2 py-1 rounded font-bold text-black" 
+                                         style="background-color: ${getControversyColor(controversyRating)}">
+                                        ${controversyRating}/10
+                                    </div>
+                                </div>
+                            ` : ''}
                         </div>
-                        <div class="prose max-w-none">
-                            ${processedSummary}
+                        <div class="prose max-w-none summary-content">
+                            ${formattedSummary}
                         </div>
                     `;
-                    
-                    // Apply additional styling to the rendered Markdown
-                    const proseDiv = article.querySelector('.prose');
-                    proseDiv.querySelectorAll('h1, h2, h3, h4').forEach(header => {
-                        header.className = 'font-bold mt-4 mb-2';
-                    });
-                    proseDiv.querySelectorAll('ul, ol').forEach(list => {
-                        list.className = 'my-2 ml-6';
-                    });
-                    proseDiv.querySelectorAll('li').forEach(item => {
-                        item.className = 'my-1';
-                    });
-                    proseDiv.querySelectorAll('p').forEach(p => {
-                        p.className = 'my-2';
-                    });
                     
                     summariesEl.appendChild(article);
                 });
             } catch (error) {
-                loadingMessage.innerHTML = `
+                loadingEl.innerHTML = `
                     <div class="text-red-600">
                         Error loading summaries. 
                         <button onclick="checkForSummaries()" class="underline ml-2">
@@ -107,7 +176,6 @@
             }
         }
 
-        // Start checking for summaries when page loads
         document.addEventListener('DOMContentLoaded', checkForSummaries);
     </script>
 </body>
