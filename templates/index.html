@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -13,22 +14,27 @@
             padding: 0;
             margin: 0;
         }
+
         .summary-content li {
             /* display: flex; */
             /* align-items: flex-start; */
             padding: 0.25rem 0;
             line-height: 1.5;
         }
+
         .summary-content a {
             margin-left: 0.15rem;
         }
+
         .summary-content li::before {
             content: "—";
             color: rgb(37 99 235);
             font-weight: bold;
             margin-right: 0.5rem;
-            min-width: 1rem; */
+            min-width: 1rem;
+            */
         }
+
         /* Remove any spacing between citation links */
         /* .summary-content a {
             display: inline;
@@ -41,11 +47,12 @@
         } */
     </style>
 </head>
+
 <body class="bg-gray-100">
     <div class="container mx-auto px-4 py-8">
         <h1 class="text-4xl font-bold mb-2 text-gray-800">10 Minutes A Day - HackerNews</h1>
         <div id="last-updated" class="text-sm text-gray-600 mb-8"></div>
-        
+
         <div id="loading" class="text-center py-8">
             <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-gray-900 mx-auto"></div>
             <p id="loading-message" class="mt-4 text-gray-600">Checking for summaries...</p>
@@ -62,24 +69,24 @@
 
         function getControversyColor(rating) {
             if (rating <= 5) {
-                return `rgb(${Math.floor(255 * (rating/5))}, 255, 0)`;
+                return `rgb(${Math.floor(255 * (rating / 5))}, 255, 0)`;
             } else {
-                return `rgb(255, ${Math.floor(255 * (2 - rating/5))}, 0)`;
+                return `rgb(255, ${Math.floor(255 * (2 - rating / 5))}, 0)`;
             }
         }
 
         async function updateLastUpdateTime(lastUpdateTime) {
             const lastUpdatedEl = document.getElementById('last-updated');
             const DateTime = luxon.DateTime;
-            
+
             function updateDisplay() {
                 const now = DateTime.now().setZone('America/Los_Angeles');
                 const lastUpdate = DateTime.fromISO(lastUpdateTime).setZone('America/Los_Angeles');
                 const diff = now.diff(lastUpdate, ['hours', 'minutes']).toObject();
-                
+
                 const hours = Math.abs(Math.floor(diff.hours));
                 const minutes = Math.abs(Math.floor(diff.minutes));
-                
+
                 let timeAgo;
                 if (hours >= 24) {
                     const days = Math.floor(hours / 24);
@@ -89,7 +96,7 @@
                 } else {
                     timeAgo = `${minutes} minute${minutes >= 2 ? 's' : ''} ago`;
                 }
-                
+
                 // Add debug info
                 console.log('Time calculation:', {
                     now: now.toString(),
@@ -97,18 +104,18 @@
                     diff: diff,
                     result: timeAgo
                 });
-                
+
                 lastUpdatedEl.textContent = `Last updated: ${timeAgo}`;
             }
-            
+
             // Update immediately
             updateDisplay();
-            
+
             // Update every minute
             return setInterval(updateDisplay, 60000);
         }
 
-        function formatSummaryContent(summary) {
+        function formatSummaryContent(summary, comment_count) {  // Added comment_count parameter
             // First extract the article summary if it exists
             const articleSummaryMatch = summary.match(/ARTICLE SUMMARY:\s*\n*([\s\S]*?)(?=\n*CONTROVERSY:)/);
             const articleSummary = articleSummaryMatch ? articleSummaryMatch[1].trim() : '';
@@ -127,16 +134,26 @@
             // Add the article summary if it exists
             if (articleSummary) {
                 formattedContent.push(`
-                    <div class="mb-4 text-gray-700 border-l-4 border-blue-500 pl-4 py-2 bg-gray-50">
-                        ${articleSummary}
-                    </div>
-                `);
+            <div class="mb-4 text-gray-700 border-l-4 border-blue-500 pl-4 py-2 bg-gray-50">
+                ${articleSummary}
+            </div>
+        `);
             }
 
             // Add the "Reader's Thoughts" header
             formattedContent.push(`
-                <h3 class="font-medium text-lg text-gray-900 mb-3">Reader's Thoughts</h3>
-            `);
+        <h3 class="font-medium text-lg text-gray-900 mb-3">Reader's Thoughts</h3>
+    `);
+
+            // Check for minimum comments
+            if (comment_count < 5) {
+                formattedContent.push(`
+            <div class="text-gray-600 italic mb-4">
+                There are not enough comments to generate a summary of the reader's thoughts.
+            </div>
+        `);
+                return formattedContent.join('\n');
+            }
 
             let lines = content.split('\n');
             let inList = false;
@@ -177,38 +194,38 @@
             const loadingEl = document.getElementById('loading');
             const loadingMessage = document.getElementById('loading-message');
             const summariesEl = document.getElementById('summaries');
-            
+
             try {
                 // First fetch last update time
                 const updateResponse = await fetch('/api/last_update');
                 const updateData = await updateResponse.json();
-                
+
                 if (updateData.last_updated) {
                     updateLastUpdateTime(updateData.last_updated);
                 }
 
                 const response = await fetch('/api/summaries');
                 const summaries = await response.json();
-                
+
                 if (!summaries || summaries.length === 0) {
                     loadingMessage.textContent = "Initial summarization in progress. This may take a few minutes...";
                     setTimeout(checkForSummaries, 10000);
                     return;
                 }
-                
+
                 loadingEl.classList.add('hidden');
                 summariesEl.classList.remove('hidden');
-                
+
                 summaries.forEach(summary => {
                     const article = document.createElement('article');
                     article.className = 'bg-white rounded-lg shadow-md p-6';
-                    
+
                     const controversyMatch = summary.summary.match(/CONTROVERSY:\s*(\d+)/);
                     const controversyRating = controversyMatch ? parseInt(controversyMatch[1]) : null;
-                    
+
                     // Format the summary content
-                    const formattedSummary = formatSummaryContent(summary.summary);
-                    
+                    const formattedSummary = formatSummaryContent(summary.summary, summary.comment_count);
+
                     article.innerHTML = `
                         <h2 class="text-xl font-semibold mb-2">
                             <a href="${summary.url}" class="text-blue-600 hover:text-blue-800" target="_blank">
@@ -240,7 +257,7 @@
                             ${formattedSummary}
                         </div>
                     `;
-                    
+
                     summariesEl.appendChild(article);
                 });
             } catch (error) {
@@ -258,4 +275,5 @@
         document.addEventListener('DOMContentLoaded', checkForSummaries);
     </script>
 </body>
+
 </html>
