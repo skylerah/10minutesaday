@@ -2,8 +2,8 @@ from flask import Flask
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
 import pytz
-from .database import init_db
-from .summarizer import update_summaries
+from database import init_db
+from summarizer import update_summaries
 import logging
 
 logger = logging.getLogger(__name__)
@@ -16,7 +16,7 @@ def create_app():
     init_db()
     
     # Register blueprints
-    from app.main import main_bp
+    from main import main_bp
     app.register_blueprint(main_bp)
     
     # Perform initial update
@@ -48,4 +48,6 @@ def create_app():
     
     return app
 
+# Create the app instance
 app = create_app()
+

@@ -1,6 +1,6 @@
 from flask import Blueprint, render_template, jsonify
 import logging
-from .summarizer import HNSummarizer
+from summarizer import HNSummarizer
 
 main_bp = Blueprint('main', __name__)
 logger = logging.getLogger(__name__)
