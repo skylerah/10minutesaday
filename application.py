@@ -5,6 +5,7 @@ import pytz
 from database import init_db
 from summarizer import update_summaries
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 scheduler = BackgroundScheduler()
@@ -27,25 +28,30 @@ def create_app():
     except Exception as e:
         logger.error(f"Error during initial summary update: {str(e)}")
     
-    # Schedule the next update for 24 hours from now
-    next_run = datetime.now(pytz.UTC) + timedelta(days=1)
-    next_run = next_run.replace(hour=6, minute=0, second=0, microsecond=0)
-    
-    # Schedule recurring updates
-    scheduler.add_job(
-        update_summaries,
-        'cron',
-        hour=6,
-        minute=0,
-        timezone=pytz.UTC,
-        id='update_summaries'
-    )
-    
-    logger.info(f"Scheduled next update for: {next_run}")
-    
-    # Start the scheduler
-    scheduler.start()
-    
+    # Only start the scheduler if it's the main process
+    if os.environ.get("RUN_MAIN") == "true":
+        try:
+            # Schedule the next update for 24 hours from now
+            next_run = datetime.now(pytz.UTC) + timedelta(days=1)
+            next_run = next_run.replace(hour=6, minute=0, second=0, microsecond=0)
+            
+            # Schedule recurring updates
+            scheduler.add_job(
+                update_summaries,
+                'cron',
+                hour=6,
+                minute=0,
+                timezone=pytz.UTC,
+                id='update_summaries'
+            )
+            
+            logger.info(f"Scheduled next update for: {next_run}")
+            
+            # Start the scheduler
+            scheduler.start()
+        except Exception as e:
+            logger.error(f"Error starting the scheduler: {str(e)}")
+
     return app
 
 # Create the app instance
