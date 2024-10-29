@@ -13,10 +13,10 @@
         
         <div id="loading" class="text-center py-8">
             <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-gray-900 mx-auto"></div>
-            <p class="mt-4 text-gray-600">Fetching and analyzing discussions...</p>
+            <p id="loading-message" class="mt-4 text-gray-600">Checking for summaries...</p>
         </div>
 
-        <div id="summaries" class="space-y-6"></div>
+        <div id="summaries" class="space-y-6 hidden"></div>
     </div>
 
     <script>
@@ -26,23 +26,35 @@
             mangle: false
         });
 
-        document.addEventListener('DOMContentLoaded', async () => {
+        async function checkForSummaries() {
             const loadingEl = document.getElementById('loading');
+            const loadingMessage = document.getElementById('loading-message');
             const summariesEl = document.getElementById('summaries');
-
+            
             try {
                 const response = await fetch('/api/summaries');
                 const summaries = await response.json();
                 
-                loadingEl.style.display = 'none';
+                if (!summaries || summaries.length === 0) {
+                    // If no summaries, wait and try again
+                    loadingMessage.textContent = "Initial summarization in progress. This may take a few minutes...";
+                    setTimeout(checkForSummaries, 10000); // Try again in 10 seconds
+                    return;
+                }
+                
+                // We have summaries, show them
+                loadingEl.classList.add('hidden');
+                summariesEl.classList.remove('hidden');
                 
                 summaries.forEach(summary => {
                     const article = document.createElement('article');
                     article.className = 'bg-white rounded-lg shadow-md p-6';
                     
                     // Process the summary through marked for Markdown rendering
-                    // while preserving our HTML citation links
                     const processedSummary = marked.parse(summary.summary);
+                    
+                    // Ensure comment_count is handled properly
+                    const commentCount = summary.comment_count || 0;
                     
                     article.innerHTML = `
                         <h2 class="text-xl font-semibold mb-2">
@@ -53,7 +65,7 @@
                         <div class="text-sm text-gray-600 mb-4 flex gap-4">
                             <span>${summary.points} points</span>
                             <span>|</span>
-                            <span>${summary.commentCount} comments</span>
+                            <span>${commentCount} comments</span>
                             <span>|</span>
                             <a href="https://news.ycombinator.com/item?id=${summary.story_id}" 
                                class="text-blue-600 hover:text-blue-800" 
@@ -84,11 +96,19 @@
                     summariesEl.appendChild(article);
                 });
             } catch (error) {
-                loadingEl.innerHTML = `
-                    <p class="text-red-600">Error loading summaries: ${error.message}</p>
+                loadingMessage.innerHTML = `
+                    <div class="text-red-600">
+                        Error loading summaries. 
+                        <button onclick="checkForSummaries()" class="underline ml-2">
+                            Try again
+                        </button>
+                    </div>
                 `;
             }
-        });
+        }
+
+        // Start checking for summaries when page loads
+        document.addEventListener('DOMContentLoaded', checkForSummaries);
     </script>
 </body>
 </html>
