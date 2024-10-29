@@ -1,7 +1,7 @@
 from flask import Flask
 from datetime import datetime, timedelta
 import logging
-from .database import init_db
+from database import init_db
 
 logger = logging.getLogger(__name__)
 
@@ -12,7 +12,7 @@ def create_app():
     init_db()
     
     # Register blueprints
-    from app.main import main_bp
+    from main import main_bp
     app.register_blueprint(main_bp)
     
     return app

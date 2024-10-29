@@ -1,6 +1,6 @@
 from flask import Blueprint, render_template, jsonify
 import logging
-from .summarizer import HNSummarizer, update_summaries
+from summarizer import HNSummarizer, update_summaries
 import threading
 import time
 
