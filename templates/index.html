@@ -3,9 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>HackerNews Discussion Summarizer</title>
+    <title>10 Minutes A Day - HackerNews</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.2/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.3/build/global/luxon.min.js"></script>
     <style>
         .summary-content ul {
             list-style-type: none;
@@ -17,6 +18,9 @@
             /* align-items: flex-start; */
             padding: 0.25rem 0;
             line-height: 1.5;
+        }
+        .summary-content a {
+            margin-left: 0.15rem;
         }
         .summary-content li::before {
             content: "—";
@@ -39,7 +43,8 @@
 </head>
 <body class="bg-gray-100">
     <div class="container mx-auto px-4 py-8">
-        <h1 class="text-4xl font-bold mb-8 text-gray-800">HackerNews Discussion Summarizer</h1>
+        <h1 class="text-4xl font-bold mb-2 text-gray-800">10 Minutes A Day - HackerNews</h1>
+        <div id="last-updated" class="text-sm text-gray-600 mb-8"></div>
         
         <div id="loading" class="text-center py-8">
             <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-gray-900 mx-auto"></div>
@@ -63,14 +68,77 @@
             }
         }
 
+        async function updateLastUpdateTime(lastUpdateTime) {
+            const lastUpdatedEl = document.getElementById('last-updated');
+            const DateTime = luxon.DateTime;
+            
+            function updateDisplay() {
+                const now = DateTime.now().setZone('America/Los_Angeles');
+                const lastUpdate = DateTime.fromISO(lastUpdateTime).setZone('America/Los_Angeles');
+                const diff = now.diff(lastUpdate, ['hours', 'minutes']).toObject();
+                
+                const hours = Math.abs(Math.floor(diff.hours));
+                const minutes = Math.abs(Math.floor(diff.minutes));
+                
+                let timeAgo;
+                if (hours >= 24) {
+                    const days = Math.floor(hours / 24);
+                    timeAgo = `${days} day${days > 1 ? 's' : ''} ago`;
+                } else if (hours >= 1) {
+                    timeAgo = `${hours} hour${hours >= 2 ? 's' : ''} ago`;
+                } else {
+                    timeAgo = `${minutes} minute${minutes >= 2 ? 's' : ''} ago`;
+                }
+                
+                // Add debug info
+                console.log('Time calculation:', {
+                    now: now.toString(),
+                    lastUpdate: lastUpdate.toString(),
+                    diff: diff,
+                    result: timeAgo
+                });
+                
+                lastUpdatedEl.textContent = `Last updated: ${timeAgo}`;
+            }
+            
+            // Update immediately
+            updateDisplay();
+            
+            // Update every minute
+            return setInterval(updateDisplay, 60000);
+        }
+
         function formatSummaryContent(summary) {
+            // First extract the article summary if it exists
+            const articleSummaryMatch = summary.match(/ARTICLE SUMMARY:\s*\n*([\s\S]*?)(?=\n*CONTROVERSY:)/);
+            const articleSummary = articleSummaryMatch ? articleSummaryMatch[1].trim() : '';
+
             let content = summary
+                .replace(/ARTICLE SUMMARY:\s*\n*[\s\S]*?(?=\n*CONTROVERSY:)/, '')
                 .replace(/CONTROVERSY:\s*\d+\s*\n*/g, '')
                 .replace(/KEY POINTS:\s*\n*/g, '')
+                .replace(/\*\*\*\*(.*?)\*\*:\*\*/g, '$1:')
+                .replace(/\*\*\*\*(.*?)\*\*/g, '$1')
+                .replace(/\*\*(.*?)\*\*/g, '$1')
                 .trim();
 
+            let formattedContent = [];
+
+            // Add the article summary if it exists
+            if (articleSummary) {
+                formattedContent.push(`
+                    <div class="mb-4 text-gray-700 border-l-4 border-blue-500 pl-4 py-2 bg-gray-50">
+                        ${articleSummary}
+                    </div>
+                `);
+            }
+
+            // Add the "Reader's Thoughts" header
+            formattedContent.push(`
+                <h3 class="font-medium text-lg text-gray-900 mb-3">Reader's Thoughts</h3>
+            `);
+
             let lines = content.split('\n');
-            let formattedLines = [];
             let inList = false;
 
             for (let line of lines) {
@@ -78,28 +146,31 @@
                 if (line) {
                     if (line.startsWith('•') || line.startsWith('* ') || line.startsWith('- ')) {
                         if (!inList) {
-                            formattedLines.push('<ul>');
+                            formattedContent.push('<ul>');
                             inList = true;
                         }
                         let content = line.replace(/^[•*-]\s*/, '').trim();
-                        // Ensure no spaces between citations
+                        content = content
+                            .replace(/\*\*\*\*(.*?)\*\*:\*\*/g, '$1:')
+                            .replace(/\*\*\*\*(.*?)\*\*/g, '$1')
+                            .replace(/\*\*(.*?)\*\*/g, '$1');
                         content = content.replace(/\]\s+\[/g, '][');
-                        formattedLines.push(`<li>${content} </li>`);
+                        formattedContent.push(`<li>${content}</li>`);
                     } else {
                         if (inList) {
-                            formattedLines.push('</ul>');
+                            formattedContent.push('</ul>');
                             inList = false;
                         }
-                        formattedLines.push(`<p>${line}</p>`);
+                        formattedContent.push(`<p>${line}</p>`);
                     }
                 }
             }
 
             if (inList) {
-                formattedLines.push('</ul>');
+                formattedContent.push('</ul>');
             }
 
-            return formattedLines.join('\n');
+            return formattedContent.join('\n');
         }
 
         async function checkForSummaries() {
@@ -108,6 +179,14 @@
             const summariesEl = document.getElementById('summaries');
             
             try {
+                // First fetch last update time
+                const updateResponse = await fetch('/api/last_update');
+                const updateData = await updateResponse.json();
+                
+                if (updateData.last_updated) {
+                    updateLastUpdateTime(updateData.last_updated);
+                }
+
                 const response = await fetch('/api/summaries');
                 const summaries = await response.json();
                 

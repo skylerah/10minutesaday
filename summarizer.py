@@ -9,6 +9,7 @@ from openai import OpenAI
 import requests
 import html
 import re
+from article_analyzer import ArticleAnalyzer
 
 # Configure logging
 logging.basicConfig(
@@ -22,9 +23,10 @@ class HNSummarizer:
     def __init__(self):
         logger.info("Initializing HNSummarizer")
         self.client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+        self.article_analyzer = ArticleAnalyzer()
         self.HN_API_BASE = "https://hacker-news.firebaseio.com/v0"
         self.MAX_STORIES = 30
-        self.MAX_COMMENTS_PER_STORY = 100
+        self.MAX_COMMENTS_PER_STORY = 300
         self.MAX_WORKERS = 5
         self.db_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'summaries.db')
 
@@ -88,6 +90,7 @@ class HNSummarizer:
         comment_map = {str(i + 1): comment['id'] for i, comment in enumerate(comments)}
         
         def replace_citation(match):
+            # Handle both [N] format and (N1, N2, N3) format
             citation_numbers = re.findall(r'\d+', match.group(0))
             citation_links = []
             for num in citation_numbers:
@@ -97,61 +100,83 @@ class HNSummarizer:
                         f'<a href="https://news.ycombinator.com/item?id={comment_id}" '
                         f'class="text-blue-600 hover:text-blue-800" target="_blank">[{num}]</a>'
                     )
-            return ' '.join(citation_links)
+            return ''.join(citation_links)
 
-        # Replace citation markers with HTML links
-        processed_summary = re.sub(r'\[(\d+(?:,\s*\d+)*)\]', replace_citation, summary)
+        # First, convert any parenthetical citations to bracket format
+        summary = re.sub(r'\((\d+(?:,\s*\d+)*)\)', lambda m: '[' + ']['.join(m.group(1).replace(' ', '').split(',')) + ']', summary)
+        
+        # Then process all citations in bracket format
+        processed_summary = re.sub(r'\[(\d+)\]', replace_citation, summary)
         return processed_summary
 
     def summarize_comments(self, story: Dict[str, Any], comments: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Use GPT-4 to create concise summaries and analyze controversy level."""
         story_id = story['id']
-        logger.info(f"Summarizing comments for story {story_id}: {story.get('title', 'No title')}")
+        story_url = story.get('url', '')
         
-        # Count total comments for the story (including nested comments)
+        # Get total comments count
         total_comments = len(comments)
         if 'descendants' in story:
             total_comments = story['descendants']
         
-        # Prepare the context for GPT-4
+        # First, try to get article content
+        article_context = ""
+        if story_url:
+            logger.info(f"Fetching article content from {story_url}")
+            article_content = self.article_analyzer.extract_article_content(story_url)
+            if article_content:
+                article_context = self.article_analyzer.get_summary_context(article_content)
+                logger.info("Successfully extracted article content")
+            else:
+                logger.warning("Could not extract article content")
+        
+        # Prepare comments
         comment_texts = []
         for i, comment in enumerate(comments, 1):
             if comment and 'text' in comment:
                 comment_texts.append(f"[{i}] {html.unescape(comment.get('text', ''))}")
-        
-        logger.debug(f"Processing {len(comment_texts)} comments for summarization")
-        
-        prompt = f"""
-        Analyze this Hacker News discussion and provide:
 
-        1. The 3-5 most significant points from the discussion, in bullet form. Each bullet should be 1-2 lines maximum.
-        2. A controversy rating from 0-10, where:
+        prompt = f"""
+        First, understand the article being discussed:
+        {article_context}
+
+        Now, analyze the discussion thread about this article, understanding both the article's content and the comments.
+        Provide:
+
+        1. A 1-2 sentence summary of the article itself.
+
+        2. A controversy rating based on the overall discussion:
            - 0: Complete consensus, minimal disagreement
            - 5: Healthy debate with different viewpoints
            - 10: Intense disagreement, strong opposing views
 
+        3. The 3-5 most significant themes or points from the OVERALL discussion, considering both the article content
+        and the community's response. After identifying each key point, find supporting evidence in the comments.
+
         Title: {story.get('title')}
-        URL: {story.get('url', 'No URL')}
-        Number of comments: {len(comments)}
+        Number of comments analyzed: {len(comments)} out of {total_comments} total comments
 
         RESPONSE FORMAT:
+        ARTICLE SUMMARY:
+        [1-2 sentence summary of the article content]
+
         CONTROVERSY: [rating]
 
         KEY POINTS:
-        - [key point without referencing specific users] [citations]
-        - [key point without referencing specific users] [citations]
-        - [key point without referencing specific users] [citations]
-        (etc.)
+        - [plain text point without any formatting] [1][2][3]
+        - [plain text point without any formatting] [4][5][6]
+        - [plain text point without any formatting] [7][8][9]
+        - [etc]...
 
         IMPORTANT: 
-        - Always cite specific comments using [N] notation
-        - Focus on the points being made, not who made them
-        - State points directly without phrases like "users noted," "commenters suggested," etc.
+        - Keep the article summary very concise (1-2 sentences maximum)
+        - Do not use any markdown formatting (no asterisks, no bold text)
+        - Write points in plain text only
+        - Consider both the article's content and the community's response
+        - First understand the overall discussion, then find citations to support each point
+        - Focus on points that represent significant themes in the discussion
+        - Citations must be in the format [N] with square brackets
+        - Multiple citations should be adjacent: [1][2][3]
         - Keep each point concise and clear
-        - Use dashes (-) for all bullet points
-
-        Comments:
-        {chr(10).join(comment_texts[:15])}
         """
 
         try:
@@ -161,7 +186,17 @@ class HNSummarizer:
                 messages=[
                     {
                         "role": "system", 
-                        "content": "You are an expert at analyzing technical discussions. Be extremely concise and focus on the most important points. Never reference users directly (e.g., avoid 'User 1 said,' 'commenters noted,' etc.). Instead, state points directly and use citations to support them."
+                        "content": """You are an expert at analyzing technical discussions and articles. 
+                        Your task is to:
+                        1. First understand the article being discussed
+                        2. Then analyze how the community responded to and discussed the article
+                        3. Identify the most significant points that represent the broader conversation
+                        4. Find specific comments that best support or illustrate each point
+                        
+                        Be extremely concise and focus on the most important points.
+                        Never use markdown formatting - provide all text in plain format.
+                        Never reference individual users - instead, state points that reflect broader themes.
+                        Always format citations as [N] with square brackets, adjacent to each other like [1][2][3]."""
                     },
                     {
                         "role": "user", 
@@ -195,20 +230,21 @@ class HNSummarizer:
                 'summary': f"Error generating summary: {str(e)}"
             }
 
-    def save_summary(self, summary_data: Dict[str, Any]):
+    def save_summary(self, summary_data: Dict[str, Any], position: int):
         """Save a summary to the database."""
         with self.get_db() as conn:
             conn.execute("""
                 INSERT OR REPLACE INTO summaries 
-                (story_id, title, url, points, comment_count, summary, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+                (story_id, title, url, points, comment_count, summary, position, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
             """, (
                 summary_data['story_id'],
                 summary_data['title'],
                 summary_data['url'],
                 summary_data['points'],
                 summary_data['commentCount'],
-                summary_data['summary']
+                summary_data['summary'],
+                position
             ))
 
     def get_cached_summaries(self) -> List[Dict[str, Any]]:
@@ -218,7 +254,7 @@ class HNSummarizer:
             cursor = conn.execute("""
                 SELECT * FROM summaries 
                 WHERE created_at > datetime('now', '-24 hours')
-                ORDER BY points DESC
+                ORDER BY position ASC
             """)
             return [dict(row) for row in cursor.fetchall()]
 
@@ -235,7 +271,7 @@ class HNSummarizer:
         logger.info("Old summaries cleared")
 
 def update_summaries():
-    """Function to update summaries. Called both on startup and by scheduler."""
+    """Function to update summaries. Called by scheduler or API endpoint."""
     logger.info("Starting summary update")
     summarizer = HNSummarizer()
     
@@ -249,16 +285,16 @@ def update_summaries():
         
         processed_stories = 0
         with ThreadPoolExecutor(max_workers=summarizer.MAX_WORKERS) as executor:
-            for story_id in stories:
+            for position, story_id in enumerate(stories):
                 try:
                     story = summarizer.fetch_item(story_id)
                     if story:
                         comments = summarizer.fetch_comments(story_id)
                         summary = summarizer.summarize_comments(story, comments)
-                        summarizer.save_summary(summary)
+                        summarizer.save_summary(summary, position)  # Added position here
                         processed_stories += 1
                         logger.info(f"Processed story {processed_stories}/{total_stories}")
-                        time.sleep(1)
+                        time.sleep(1)  # Rate limiting
                 except Exception as e:
                     logger.error(f"Error processing story {story_id}: {str(e)}")
                     continue
