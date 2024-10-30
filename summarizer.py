@@ -274,16 +274,29 @@ def update_summaries():
     """Function to update summaries. Called by scheduler or API endpoint."""
     logger.info("Starting summary update")
     summarizer = HNSummarizer()
-    
+
     try:
-        # Clear old summaries before updating
-        summarizer.clear_old_summaries()
+        # Create a temporary table for the new summaries
+        with summarizer.get_db() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS summaries_temp (
+                    story_id INTEGER PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    url TEXT,
+                    points INTEGER,
+                    comment_count INTEGER,
+                    summary TEXT NOT NULL,
+                    position INTEGER NOT NULL,
+                    created_at TIMESTAMP NOT NULL
+                )
+            """)
         
         stories = summarizer.fetch_top_stories()
         total_stories = len(stories)
         logger.info(f"Fetched {total_stories} stories to process")
         
         processed_stories = 0
+        # Save new summaries to temporary table
         with ThreadPoolExecutor(max_workers=summarizer.MAX_WORKERS) as executor:
             for position, story_id in enumerate(stories):
                 try:
@@ -291,7 +304,23 @@ def update_summaries():
                     if story:
                         comments = summarizer.fetch_comments(story_id)
                         summary = summarizer.summarize_comments(story, comments)
-                        summarizer.save_summary(summary, position)  # Added position here
+                        
+                        # Save to temp table instead of main table
+                        with summarizer.get_db() as conn:
+                            conn.execute("""
+                                INSERT OR REPLACE INTO summaries_temp 
+                                (story_id, title, url, points, comment_count, summary, position, created_at)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                            """, (
+                                summary['story_id'],
+                                summary['title'],
+                                summary['url'],
+                                summary['points'],
+                                summary['commentCount'],
+                                summary['summary'],
+                                position
+                            ))
+                        
                         processed_stories += 1
                         logger.info(f"Processed story {processed_stories}/{total_stories}")
                         time.sleep(1)  # Rate limiting
@@ -299,8 +328,43 @@ def update_summaries():
                     logger.error(f"Error processing story {story_id}: {str(e)}")
                     continue
         
+        # If we processed at least some stories successfully, swap the tables
+        if processed_stories > 0:
+            with summarizer.get_db() as conn:
+                conn.execute("BEGIN TRANSACTION")
+                try:
+                    # Rename existing table to _old
+                    conn.execute("ALTER TABLE summaries RENAME TO summaries_old")
+                    # Rename new table to main name
+                    conn.execute("ALTER TABLE summaries_temp RENAME TO summaries")
+                    # Drop old table
+                    conn.execute("DROP TABLE summaries_old")
+                    # Update last_update timestamp
+                    conn.execute("""
+                        UPDATE last_update 
+                        SET last_updated = datetime('now')
+                        WHERE id = 1
+                    """)
+                    conn.execute("COMMIT")
+                    logger.info(f"Successfully swapped in {processed_stories} new summaries")
+                except Exception as e:
+                    conn.execute("ROLLBACK")
+                    logger.error(f"Error swapping tables: {str(e)}")
+                    raise
+        else:
+            # If no stories were processed, clean up temp table
+            with summarizer.get_db() as conn:
+                conn.execute("DROP TABLE IF EXISTS summaries_temp")
+            logger.error("No stories were successfully processed")
+            
         logger.info(f"Successfully completed summary update. Processed {processed_stories} stories.")
         
     except Exception as e:
         logger.error(f"Error during summary update: {str(e)}")
+        # Clean up temp table if it exists
+        try:
+            with summarizer.get_db() as conn:
+                conn.execute("DROP TABLE IF EXISTS summaries_temp")
+        except:
+            pass
         raise
