@@ -26,7 +26,7 @@ class HNSummarizer:
         self.article_analyzer = ArticleAnalyzer()
         self.HN_API_BASE = "https://hacker-news.firebaseio.com/v0"
         self.MAX_STORIES = 30
-        self.MAX_COMMENTS_PER_STORY = 300
+        self.MAX_COMMENTS_PER_STORY = 200
         self.MAX_WORKERS = 5
         self.db_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'summaries.db')
 
@@ -66,23 +66,74 @@ class HNSummarizer:
             return []
 
     def fetch_comments(self, story_id: int) -> List[Dict[str, Any]]:
-        """Recursively fetch comments for a story."""
-        logger.info(f"Fetching comments for story {story_id}")
+        """Fetch comments while maintaining thread structure."""
         story = self.fetch_item(story_id)
         if not story or 'kids' not in story:
             logger.debug(f"No comments found for story {story_id}")
             return []
 
-        comments = []
-        comment_ids = story['kids'][:self.MAX_COMMENTS_PER_STORY]
-        logger.debug(f"Fetching {len(comment_ids)} comments for story {story_id}")
+        def fetch_comment_tree(comment_id: int, depth: int = 0) -> Dict[str, Any]:
+            """Recursively fetch a comment and its replies."""
+            comment = self.fetch_item(comment_id)
+            if not comment or comment.get('deleted') or comment.get('dead'):
+                return None
+            
+            # Add depth info to track level in thread
+            comment['depth'] = depth
+            
+            # Recursively fetch child comments
+            if 'kids' in comment:
+                comment['replies'] = []
+                for child_id in comment['kids']:
+                    child_comment = fetch_comment_tree(child_id, depth + 1)
+                    if child_comment:
+                        comment['replies'].append(child_comment)
+            
+            return comment
+
+        # Process top-level comments and their threads
+        threaded_comments = []
+        top_level_comments = story['kids'][:self.MAX_COMMENTS_PER_STORY]
         
         with ThreadPoolExecutor(max_workers=self.MAX_WORKERS) as executor:
-            comment_futures = [executor.submit(self.fetch_item, cid) for cid in comment_ids]
-            comments = [f.result() for f in comment_futures if f.result()]
+            comment_futures = [
+                executor.submit(fetch_comment_tree, cid, 0) 
+                for cid in top_level_comments
+            ]
+            threaded_comments = [
+                f.result() for f in comment_futures 
+                if f.result() and not f.result().get('deleted')
+            ]
 
-        logger.info(f"Successfully fetched {len(comments)} comments for story {story_id}")
-        return comments
+        # Flatten the thread structure for GPT while maintaining depth info
+        flattened_comments = []
+        
+        def flatten_thread(comment: Dict[str, Any]):
+            """Flatten the thread structure while preserving depth information."""
+            if not comment:
+                return
+                
+            # Create flattened comment with depth info
+            flat_comment = {
+                'id': comment['id'],
+                'text': comment.get('text', ''),
+                'depth': comment['depth'],
+                'parent': comment.get('parent'),
+                'time': comment.get('time')
+            }
+            flattened_comments.append(flat_comment)
+            
+            # Process replies
+            if 'replies' in comment:
+                for reply in comment['replies']:
+                    flatten_thread(reply)
+
+        # Flatten all comment threads
+        for comment in threaded_comments:
+            flatten_thread(comment)
+
+        logger.info(f"Successfully fetched {len(flattened_comments)} comments in thread structure for story {story_id}")
+        return flattened_comments
 
     def process_gpt_response(self, summary: str, story_id: int, comments: List[Dict[str, Any]]) -> str:
         """Process GPT response to convert citation markers into HTML links."""
@@ -110,105 +161,162 @@ class HNSummarizer:
         return processed_summary
 
     def summarize_comments(self, story: Dict[str, Any], comments: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Two-step process: first summarize, then find supporting citations."""
         story_id = story['id']
         story_url = story.get('url', '')
+        logger.info(f"Summarizing comments for story {story_id}: {story.get('title', 'No title')}")
         
-        # Get total comments count
-        total_comments = len(comments)
-        if 'descendants' in story:
-            total_comments = story['descendants']
-        
-        # First, try to get article content
-        article_context = ""
-        if story_url:
-            logger.info(f"Fetching article content from {story_url}")
-            article_content = self.article_analyzer.extract_article_content(story_url)
-            if article_content:
-                article_context = self.article_analyzer.get_summary_context(article_content)
-                logger.info("Successfully extracted article content")
-            else:
-                logger.warning("Could not extract article content")
-        
-        # Prepare comments
-        comment_texts = []
-        for i, comment in enumerate(comments, 1):
-            if comment and 'text' in comment:
-                comment_texts.append(f"[{i}] {html.unescape(comment.get('text', ''))}")
-
-        prompt = f"""
-        First, understand the article being discussed:
-        {article_context}
-
-        Now, analyze the discussion thread about this article, understanding both the article's content and the comments.
-        Provide:
-
-        1. A 1-2 sentence summary of the article itself.
-
-        2. A controversy rating based on the overall discussion:
-           - 0: Complete consensus, minimal disagreement
-           - 5: Healthy debate with different viewpoints
-           - 10: Intense disagreement, strong opposing views
-
-        3. The 3-5 most significant themes or points from the OVERALL discussion, considering both the article content
-        and the community's response. After identifying each key point, find supporting evidence in the comments.
-
-        Title: {story.get('title')}
-        Number of comments analyzed: {len(comments)} out of {total_comments} total comments
-
-        RESPONSE FORMAT:
-        ARTICLE SUMMARY:
-        [1-2 sentence summary of the article content]
-
-        CONTROVERSY: [rating]
-
-        KEY POINTS:
-        - [plain text point without any formatting] [1][2][3]
-        - [plain text point without any formatting] [4][5][6]
-        - [plain text point without any formatting] [7][8][9]
-        - [etc]...
-
-        IMPORTANT: 
-        - Keep the article summary very concise (1-2 sentences maximum)
-        - Do not use any markdown formatting (no asterisks, no bold text)
-        - Write points in plain text only
-        - Consider both the article's content and the community's response
-        - First understand the overall discussion, then find citations to support each point
-        - Focus on points that represent significant themes in the discussion
-        - Citations must be in the format [N] with square brackets
-        - Multiple citations should be adjacent: [1][2][3]
-        - Keep each point concise and clear
-        """
-
         try:
-            logger.debug(f"Sending request to OpenAI API for story {story_id}")
-            response = self.client.chat.completions.create(
+            # Get total comments count right at the start
+            total_comments = len(comments)
+            if 'descendants' in story:
+                total_comments = story['descendants']
+
+            # Format comments with thread structure for GPT
+            comment_texts = []
+            for i, comment in enumerate(comments, 1):
+                if comment and 'text' in comment:
+                    indent = "  " * comment.get('depth', 0)  # Visual indentation for thread depth
+                    comment_texts.append(f"[{i}] {indent}{html.unescape(comment.get('text', ''))}")
+                    
+                    
+             # First, try to get article content
+            article_context = ""
+            if story_url:
+                logger.info(f"Fetching article content from {story_url}")
+                article_content = self.article_analyzer.extract_article_content(story_url)
+                if article_content:
+                    article_context = self.article_analyzer.get_summary_context(article_content)
+                    logger.info("Successfully extracted article content")
+                else:
+                    logger.warning("Could not extract article content")
+
+            # Step 1: Generate high-level summary without citations
+            summary_prompt = f"""
+            
+            First, understand the article being discussed:
+            {article_context}
+
+            Now, analyze this threaded discussion where indented comments are replies to comments above them.
+            First, read through all comments to understand the broad themes and key points of this discussion thread.
+            Pay attention to how discussions evolve within comment threads - notice when sub-discussions branch off
+            and how points are debated or expanded in the replies. Then, analyze the discussion thread about this article, understanding both the article's content and the comments.
+            
+            Provide:
+
+            1. A 1-2 sentence summary of the article itself.
+
+            2. A controversy rating based on the overall discussion:
+               - 0: Complete consensus, minimal disagreement
+               - 5: Healthy debate with different viewpoints
+               - 10: Intense disagreement, strong opposing views
+
+            3. The 3-5 most significant themes or points from the OVERALL discussion. Consider both top-level points
+            and important sub-discussions that developed in the replies. Each point should be between 1-2 sentences in length.
+
+            Title: {story.get('title')}
+            Number of comments analyzed: {len(comments)} out of {total_comments} total comments
+
+            EXACTLY FOLLOW THIS RESPONSE FORMAT:
+            ARTICLE SUMMARY:
+            [1-2 sentence summary of the article]
+            
+            CONTROVERSY: [rating]
+
+            KEY POINTS:
+            - [broad point from overall discussion]
+            - [broad point from overall discussion]
+            - [broad point from overall discussion]
+            
+            DO NOT include the word "CONTROVERSY" in the discussion points.
+            DO NOT use topic headers or categories in the points.
+            DO NOT start sentences/points with words like "The discussion...", or "The conversation..."
+            
+            IMPORTANT:
+            - Consider starting points without the use of particles like "The, This, That, etc", and instead opt for more direct statements.
+
+            Comments (indentation shows reply structure):
+            {chr(10).join(comment_texts)}
+            """
+
+            logger.debug(f"Generating initial summary for story {story_id}")
+            initial_response = self.client.chat.completions.create(
                 model="gpt-4o",
                 messages=[
                     {
                         "role": "system", 
-                        "content": """You are an expert at analyzing technical discussions and articles. 
-                        Your task is to:
-                        1. First understand the article being discussed
-                        2. Then analyze how the community responded to and discussed the article
-                        3. Identify the most significant points that represent the broader conversation
-                        4. Find specific comments that best support or illustrate each point
-                        
-                        Be extremely concise and focus on the most important points.
-                        Never use markdown formatting - provide all text in plain format.
-                        Never reference individual users - instead, state points that reflect broader themes.
-                        Always format citations as [N] with square brackets, adjacent to each other like [1][2][3]."""
+                        "content": """You are an expert at analyzing discussions and identifying key themes.
+                        Focus on understanding and summarizing the main points of the conversation.
+                        Do not reference individual comments - focus on the overall discussion."""
                     },
                     {
                         "role": "user", 
-                        "content": prompt
+                        "content": summary_prompt
                     }
                 ],
                 max_tokens=1000,
                 temperature=0.7
             )
             
-            summary = response.choices[0].message.content
-            processed_summary = self.process_gpt_response(summary, story_id, comments)
+            initial_summary = initial_response.choices[0].message.content
+
+            # Step 2: Find supporting citations for each point
+            citation_prompt = f"""
+            Below is a summary of key points from a discussion. For each point, identify 2-3 comments that best support 
+            or demonstrate that point. Use the comment numbers provided to cite relevant comments.
+
+            Summary:
+            {initial_summary}
+
+            Comments:
+            {chr(10).join(comment_texts)}
+
+            For each key point in the summary, add supporting citations in [N] format from the comments above.
+            If a point has multiple relevant comments, combine their citations (e.g., [1][4][7]).
+
+            EXACTLY FOLLOW THIS RESPONSE FORMAT:
+            
+            ARTICLE SUMMARY:
+            [1-2 sentence summary of the article]
+            
+            CONTROVERSY: [same rating as above]
+
+            KEY POINTS:
+            - [exact point from summary] [citations]
+            - [exact point from summary] [citations]
+            - [exact point from summary] [citations]
+            
+            DO NOT include the word "CONTROVERSY" in the discussion points.
+            DO NOT use topic headers or categories in the points.
+
+            IMPORTANT:
+            - Keep the original points exactly as written
+            - Add only the most relevant citations that directly support each point
+            - Use the [N] format for citations
+            - Citations should be adjacent with no spaces between them (e.g., [1][3][5])
+            """
+
+            logger.debug(f"Finding citations for story {story_id}")
+            citation_response = self.client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {
+                        "role": "system", 
+                        "content": """You are an expert at identifying supporting evidence.
+                        Your task is to find the most relevant comments that support each key point,
+                        without changing the points themselves."""
+                    },
+                    {
+                        "role": "user", 
+                        "content": citation_prompt
+                    }
+                ],
+                max_tokens=1000,
+                temperature=0.7
+            )
+            
+            final_summary = citation_response.choices[0].message.content
+            processed_summary = self.process_gpt_response(final_summary, story_id, comments)
             logger.info(f"Successfully generated summary with citations for story {story_id}")
             
             return {
@@ -219,6 +327,7 @@ class HNSummarizer:
                 'commentCount': total_comments,
                 'summary': processed_summary
             }
+
         except Exception as e:
             logger.error(f"Error generating summary for story {story_id}: {str(e)}")
             return {
@@ -226,7 +335,7 @@ class HNSummarizer:
                 'title': story['title'],
                 'url': story.get('url', ''),
                 'points': story.get('score', 0),
-                'commentCount': total_comments,
+                'commentCount': len(comments),  # Fallback to simple count in case of error
                 'summary': f"Error generating summary: {str(e)}"
             }
 
