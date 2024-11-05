@@ -241,7 +241,7 @@ class HNSummarizer:
 
             logger.debug(f"Generating initial summary for story {story_id}")
             initial_response = self.client.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-4o-mini",
                 messages=[
                     {
                         "role": "system", 
@@ -298,7 +298,7 @@ class HNSummarizer:
 
             logger.debug(f"Finding citations for story {story_id}")
             citation_response = self.client.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-4o-mini",
                 messages=[
                     {
                         "role": "system", 
